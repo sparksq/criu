@@ -167,6 +167,8 @@ message criu_opts {
 	 * through 1024. Restore-time only.
 	 */
 	optional uint32			decompress_threads	= 76 [default = 1];
+	/* Allow unsupported file descriptors to be handled over RPC notifications. */
+	optional bool			rpc_external_files	= 77;
 /*	optional bool			check_mounts		= 128;	*/
 }
 
@@ -181,6 +183,7 @@ message criu_restore_resp {
 message criu_notify {
 	optional string script		= 1;
 	optional int32	pid		= 2;
+	optional uint32 ext_file_id	= 3;
 }
 
 enum criu_req_type {

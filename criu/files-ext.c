@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include "imgset.h"
+#include "action-scripts.h"
 #include "files.h"
 #include "plugin.h"
 
@@ -17,6 +18,8 @@ static int dump_one_ext_file(int lfd, u32 id, const struct fd_parms *p)
 	ExtFileEntry xfe = EXT_FILE_ENTRY__INIT;
 
 	ret = run_plugins(DUMP_EXT_FILE, lfd, id);
+	if (ret == -ENOTSUP)
+		ret = rpc_dump_external_file(lfd, id);
 	if (ret < 0)
 		return ret;
 
@@ -50,6 +53,10 @@ static int open_fd(struct file_desc *d, int *new_fd)
 	xfi = container_of(d, struct ext_file_info, d);
 
 	fd = run_plugins(RESTORE_EXT_FILE, xfi->xfe->id, &retry_needed);
+	if (fd == -ENOTSUP) {
+		fd = rpc_restore_external_file(xfi->xfe->id);
+		retry_needed = false;
+	}
 	if (fd < 0) {
 		pr_err("Unable to restore %#x\n", xfi->xfe->id);
 		return -1;
