@@ -167,6 +167,7 @@ struct cr_options {
 	struct list_head ext_mounts;
 	struct list_head inherit_fds;
 	struct list_head external;
+	bool rpc_external_files;
 	struct list_head join_ns;
 	char *libdir;
 	int use_page_server;

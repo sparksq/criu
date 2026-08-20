@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -11,10 +12,17 @@
 #include "lib.h"
 
 static int actions_called = 0;
+static int root_pid;
 static int notify(char *action, criu_notify_arg_t na)
 {
 	printf("ACTION: %s\n", action);
 	actions_called++;
+	if ((!strcmp(action, "pre-dump") || !strcmp(action, "post-dump")) &&
+	    criu_notify_pid(na) != root_pid) {
+		fprintf(stderr, "Action %s has unexpected root pid %d (expected %d)\n",
+			action, criu_notify_pid(na), root_pid);
+		return -1;
+	}
 	return 0;
 }
 
@@ -51,6 +59,7 @@ int main(int argc, char **argv)
 	}
 
 	close(p[1]);
+	root_pid = pid;
 
 	/* Wait for kid to start */
 	ret = -1;

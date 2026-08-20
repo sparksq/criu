@@ -12,7 +12,9 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <arpa/inet.h>
+#include <poll.h>
 #include <sched.h>
 #include <sys/prctl.h>
 
@@ -51,15 +53,53 @@
 
 unsigned int service_sk_ino = -1;
 
-static int recv_criu_msg(int socket_fd, CriuReq **req)
+static void close_scm_rights(struct msghdr *msg)
+{
+	struct cmsghdr *cmsg;
+
+	for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+		int *fds;
+		size_t i, nr_fds;
+
+		if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS ||
+		    cmsg->cmsg_len < CMSG_LEN(0))
+			continue;
+		fds = (int *)CMSG_DATA(cmsg);
+		nr_fds = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(*fds);
+		for (i = 0; i < nr_fds; i++)
+			close(fds[i]);
+	}
+}
+
+static int recv_criu_msg_with_fd(int socket_fd, CriuReq **req, int *received_fd)
 {
 	u8 local[PB_PKOBJ_LOCAL_SIZE];
 	void *buf = (void *)&local;
+	union {
+		struct cmsghdr align;
+		char data[CMSG_SPACE(sizeof(int))];
+	} control = {};
+	struct iovec iov;
+	struct msghdr msg = {};
+	struct cmsghdr *cmsg;
+	struct pollfd pfd = {
+		.fd = socket_fd,
+		.events = POLLIN,
+	};
 	int len, exit_code = -1;
 
-	len = recv(socket_fd, NULL, 0, MSG_TRUNC | MSG_PEEK);
-	if (len == -1) {
-		pr_perror("Can't read request");
+	if (received_fd)
+		*received_fd = -1;
+
+	do {
+		len = poll(&pfd, 1, -1);
+	} while (len < 0 && errno == EINTR);
+	if (len < 0) {
+		pr_perror("Can't wait for RPC request");
+		goto err;
+	}
+	if (ioctl(socket_fd, FIONREAD, &len) < 0) {
+		pr_perror("Can't get RPC request size");
 		goto err;
 	}
 
@@ -69,9 +109,22 @@ static int recv_criu_msg(int socket_fd, CriuReq **req)
 			return -ENOMEM;
 	}
 
-	len = recv(socket_fd, buf, len, MSG_TRUNC);
+	iov.iov_base = buf;
+	iov.iov_len = len;
+	memset(&msg, 0, sizeof(msg));
+	memset(&control, 0, sizeof(control));
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_control = control.data;
+	msg.msg_controllen = sizeof(control.data);
+	len = recvmsg(socket_fd, &msg, MSG_TRUNC | MSG_CMSG_CLOEXEC);
 	if (len == -1) {
 		pr_perror("Can't read request");
+		goto err;
+	}
+	if (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) {
+		close_scm_rights(&msg);
+		pr_err("Truncated RPC request\n");
 		goto err;
 	}
 
@@ -79,6 +132,26 @@ static int recv_criu_msg(int socket_fd, CriuReq **req)
 		pr_info("Client exited unexpectedly\n");
 		errno = ECONNRESET;
 		goto err;
+	}
+
+	cmsg = CMSG_FIRSTHDR(&msg);
+	if (cmsg) {
+		int fd;
+
+		if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS ||
+		    cmsg->cmsg_len != CMSG_LEN(sizeof(fd)) ||
+		    CMSG_NXTHDR(&msg, cmsg) != NULL) {
+			close_scm_rights(&msg);
+			pr_err("Invalid file descriptor in RPC request\n");
+			goto err;
+		}
+		memcpy(&fd, CMSG_DATA(cmsg), sizeof(fd));
+		if (!received_fd) {
+			close(fd);
+			pr_err("Unexpected file descriptor in RPC request\n");
+			goto err;
+		}
+		*received_fd = fd;
 	}
 
 	*req = criu_req__unpack(NULL, len, buf);
@@ -89,9 +162,18 @@ static int recv_criu_msg(int socket_fd, CriuReq **req)
 
 	exit_code = 0;
 err:
+	if (exit_code && received_fd && *received_fd >= 0) {
+		close(*received_fd);
+		*received_fd = -1;
+	}
 	if (buf != (void *)&local)
 		xfree(buf);
 	return exit_code;
+}
+
+static int recv_criu_msg(int socket_fd, CriuReq **req)
+{
+	return recv_criu_msg_with_fd(socket_fd, req, NULL);
 }
 
 static int send_criu_msg_with_fd(int socket_fd, CriuResp *msg, int fd)
@@ -210,12 +292,15 @@ int send_criu_rpc_script(enum script_actions act, char *name, int sk, int fd)
 	cn.script = name;
 
 	switch (act) {
+	case ACT_PRE_DUMP:
+	case ACT_POST_DUMP:
 	case ACT_SETUP_NS:
 	case ACT_POST_RESTORE:
+	case ACT_PRE_RESUME:
+	case ACT_POST_RESUME:
 		/*
-		 * FIXME pid is required only once on
-		 * restore. Need some more sane way of
-		 * checking this.
+		 * Lifecycle RPC clients need the root task identity to coordinate
+		 * external resources without reaching into CRIU internals.
 		 */
 		cn.has_pid = true;
 		cn.pid = root_item->pid->real;
@@ -239,6 +324,51 @@ int send_criu_rpc_script(enum script_actions act, char *name, int sk, int fd)
 
 	criu_req__free_unpacked(req, NULL);
 	return 0;
+}
+
+int send_criu_rpc_ext_file(enum script_actions act, char *name, int sk,
+			   int fd, u32 id)
+{
+	CriuResp msg = CRIU_RESP__INIT;
+	CriuNotify cn = CRIU_NOTIFY__INIT;
+	CriuReq *req = NULL;
+	int received_fd = -1;
+	int ret;
+
+	msg.type = CRIU_REQ_TYPE__NOTIFY;
+	msg.success = true;
+	msg.notify = &cn;
+	cn.script = name;
+	cn.has_ext_file_id = true;
+	cn.ext_file_id = id;
+
+	ret = send_criu_msg_with_fd(sk, &msg, fd);
+	if (ret < 0)
+		return ret;
+	if (act == ACT_RESTORE_EXT_FILE)
+		ret = recv_criu_msg_with_fd(sk, &req, &received_fd);
+	else
+		ret = recv_criu_msg(sk, &req);
+	if (ret < 0)
+		return ret;
+	if (req->type != CRIU_REQ_TYPE__NOTIFY || !req->has_notify_success ||
+	    !req->notify_success) {
+		pr_err("RPC client rejected external file %#x\n", id);
+		ret = -1;
+		goto out;
+	}
+	if (act == ACT_RESTORE_EXT_FILE && received_fd < 0) {
+		pr_err("RPC client did not return external file %#x\n", id);
+		ret = -1;
+		goto out;
+	}
+	ret = act == ACT_RESTORE_EXT_FILE ? received_fd : 0;
+	received_fd = -1;
+out:
+	if (received_fd >= 0)
+		close(received_fd);
+	criu_req__free_unpacked(req, NULL);
+	return ret;
 }
 
 int exec_rpc_query_external_files(char *name, int sk)
@@ -491,6 +621,9 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 
 	if (req->has_evasive_devices)
 		opts.evasive_devices = req->evasive_devices;
+
+	if (req->has_rpc_external_files)
+		opts.rpc_external_files = req->rpc_external_files;
 
 	if (req->has_shell_job)
 		opts.shell_job = req->shell_job;
