@@ -58,14 +58,16 @@ function stop_test {
 
 function assert_raw_entry {
 	local directory="$1"
+	local expected_layout="$2"
 
 	PYTHONPATH="${BASE_DIR}/lib${PYTHONPATH:+:${PYTHONPATH}}" \
-		python3 "$RAW_ENTRY_CHECK" "$directory" "$PID"
+		python3 "$RAW_ENTRY_CHECK" "$directory" "$PID" "$expected_layout"
 }
 
 function run_mode {
 	local name="$1"
-	shift
+	local expected_layout="$2"
+	shift 2
 	local imgdir="dump-raw-$name"
 
 	rm -rf "$imgdir"
@@ -74,7 +76,8 @@ function run_mode {
 
 	"${CRIU_CMD[@]}" dump -D "$imgdir" -o dump.log -t "$PID" -v4 "$@" \
 		|| fail "$name: dump failed"
-	assert_raw_entry "$imgdir" || fail "$name: raw-entry metadata check failed"
+	assert_raw_entry "$imgdir" "$expected_layout" || \
+		fail "$name: raw-entry metadata check failed"
 	"${CRIU_CMD[@]}" restore -D "$imgdir" -o restore.log -v4 -d \
 		--image-io-mode direct \
 		|| fail "$name: restore failed"
@@ -86,7 +89,9 @@ function run_mode {
 	stop_test "$name"
 }
 
-run_mode block-4k --compress-block=4K
-run_mode block-64k --compress-block=64K
+run_mode block-4k packed --compress-block=4K
+run_mode block-64k packed --compress-block=64K
+run_mode block-256k-padded padded --compress-block=256K \
+	--image-io-mode direct
 
 echo "Test PASSED"

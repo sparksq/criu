@@ -142,6 +142,7 @@ struct encoded_read_ctx {
 	size_t jobs_cap;
 	char *compressed;
 	size_t compressed_cap;
+	bool compressed_page_aligned;
 	char *prefetch_buffer;
 	size_t prefetch_cap;
 	const void *prefetched_token;

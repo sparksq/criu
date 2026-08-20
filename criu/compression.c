@@ -928,6 +928,7 @@ void encoded_read_ctx_end_work(struct encoded_read_ctx *ctx)
 	xfree(ctx->compressed);
 	ctx->compressed = NULL;
 	ctx->compressed_cap = 0;
+	ctx->compressed_page_aligned = false;
 	xfree(ctx->prefetch_buffer);
 	ctx->prefetch_buffer = NULL;
 	ctx->prefetch_cap = 0;
@@ -1029,6 +1030,7 @@ void encoded_prefetch_publish(struct encoded_read_ctx *ctx,
 	capacity = ctx->compressed_cap;
 	ctx->compressed = ctx->prefetch_buffer;
 	ctx->compressed_cap = ctx->prefetch_cap;
+	ctx->compressed_page_aligned = false;
 	ctx->prefetch_buffer = buffer;
 	ctx->prefetch_cap = capacity;
 	ctx->prefetched_token = token;
@@ -1193,6 +1195,7 @@ static int transfer_async_block(const struct page_read_iov *piov,
 
 static int process_encoded_async_read(int fd, struct page_read_iov *piov,
 				      struct encoded_read_ctx *ctx,
+				      bool direct,
 				      bool payload_ready,
 				      struct encoded_prefetch *prefetch)
 {
@@ -1262,20 +1265,43 @@ static int process_encoded_async_read(int fd, struct page_read_iov *piov,
 	jobs = ctx->jobs;
 
 	if (total_compressed) {
-		if (ctx->compressed_cap < total_compressed) {
+		if (direct && ((uint64_t)piov->from % PAGE_SIZE ||
+			       total_compressed % PAGE_SIZE)) {
+			pr_err("Direct encoded read is not page-aligned: offset=%jd size=%zu\n",
+			       (intmax_t)piov->from, total_compressed);
+			goto out;
+		}
+		if (ctx->compressed_cap < total_compressed ||
+		    ctx->compressed_page_aligned != direct) {
 			void *new_compressed;
 
 			if (payload_ready) {
 				pr_err("Prefetched encoded payload exceeds its buffer\n");
 				goto out;
 			}
-			new_compressed = xrealloc(ctx->compressed,
-						  total_compressed);
+			if (direct) {
+				int memerr = posix_memalign(&new_compressed, PAGE_SIZE,
+							total_compressed);
+
+				if (memerr) {
+					errno = memerr;
+					pr_perror("Unable to allocate direct encoded-read buffer");
+					goto out;
+				}
+			} else if (ctx->compressed_page_aligned) {
+				new_compressed = xmalloc(total_compressed);
+			} else {
+				new_compressed = xrealloc(ctx->compressed,
+							  total_compressed);
+			}
 
 			if (!new_compressed)
 				goto out;
+			if (direct || ctx->compressed_page_aligned)
+				xfree(ctx->compressed);
 			ctx->compressed = new_compressed;
 			ctx->compressed_cap = total_compressed;
+			ctx->compressed_page_aligned = direct;
 		}
 		compressed = ctx->compressed;
 		if (!payload_ready &&
@@ -1294,6 +1320,7 @@ static int process_encoded_async_read(int fd, struct page_read_iov *piov,
 	 */
 	for (i = 0; i < piov->b_layout.nr_blocks; i++) {
 		uint32_t compressed_size = piov->b_layout.sizes[i];
+		size_t stored_size = compressed_size;
 		unsigned int block_pages = 1;
 		size_t block_bytes;
 		size_t bound = PAGE_COMPRESSED_SIZE_BOUND;
@@ -1310,8 +1337,10 @@ static int process_encoded_async_read(int fd, struct page_read_iov *piov,
 		block_bytes = (size_t)block_pages * PAGE_SIZE;
 		if (piov->b_layout.pages_per_block)
 			bound = BLOCK_COMPRESSED_SIZE_BOUND(block_pages);
+		if (compressed_size && piov->b_layout.payload_padded)
+			stored_size = round_up(stored_size, PAGE_SIZE);
 		if (compressed_size > bound ||
-		    compressed_size > total_compressed - compressed_offset) {
+		    stored_size > total_compressed - compressed_offset) {
 			pr_err("Async: invalid compressed size %u for block %zu\n",
 			       compressed_size, i);
 			goto out;
@@ -1383,7 +1412,7 @@ static int process_encoded_async_read(int fd, struct page_read_iov *piov,
 				goto out;
 		}
 
-		compressed_offset += compressed_size;
+		compressed_offset += stored_size;
 	}
 
 	/* Require exact, single consumption of the payload and destination. */
@@ -1566,7 +1595,7 @@ int encoded_async_read_batch(int fd, struct page_read_iov *piov,
 	}
 
 	ret = process_encoded_async_read(
-		fd, piov, ctx, payload_ready > 0,
+		fd, piov, ctx, pr->use_direct, payload_ready > 0,
 		prefetch_prepared ? &ctx->prefetch : NULL);
 	if (prefetch_prepared) {
 		if (ret < 0 || !ctx->prefetch.complete)

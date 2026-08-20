@@ -27,8 +27,9 @@ enum restore_vma_io_storage {
 struct page_block_layout {
 	uint32_t *sizes;          /* Payload byte size per block in the image */
 	size_t nr_blocks;         /* Total number of compressed blocks */
-	uint64_t total_bytes;     /* Sum of all block payload sizes */
+	uint64_t total_bytes;     /* Physical bytes occupied by all block payloads */
 	uint32_t pages_per_block; /* Granularity: virtual pages per block (1 for page-sized blocks) */
+	bool payload_padded;      /* Non-empty blocks occupy page-rounded extents */
 };
 
 /*
