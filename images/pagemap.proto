@@ -38,7 +38,8 @@ message pagemap_blocks {
 	repeated uint32 block_sizes	= 1 [packed = true];
 	/*
 	 * Total payload bytes this entry occupies in the pages image
-	 * (sum of all block_sizes[]). On restore it is an O(1) shortcut to
+	 * (sum of block_sizes[], page-rounded per non-empty block when
+	 * payload_padded is true). On restore it is an O(1) shortcut to
 	 * advance the read offset past a whole entry (see skip_pagemap_pages())
 	 * instead of summing block_sizes[] block by block. Offsets into the
 	 * interior of an entry are still derived by walking block_sizes[], since
@@ -49,4 +50,13 @@ message pagemap_blocks {
 	 * Number of memory pages in each compressed block (block granularity).
 	 */
 	required uint32 pages_per_block = 3;
+	/*
+	 * When true, every non-empty block occupies a host-page-rounded extent
+	 * in pages-*.img. block_sizes[] still contains the exact compressed
+	 * length; readers advance file offsets by ALIGN(block_sizes[i],
+	 * PAGE_SIZE). The entry payload is page-aligned via PE_PAYLOAD_ALIGNED.
+	 * This makes encoded payload reads suitable for O_DIRECT while keeping
+	 * the decompressor independent of the storage padding.
+	 */
+	optional bool payload_padded = 4 [default = false];
 }

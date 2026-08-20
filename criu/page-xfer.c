@@ -440,6 +440,8 @@ static int write_pagemap_loc_compressed(struct page_xfer *xfer, struct iovec *io
 			return -1;
 		xfer->pending_pe.n_compressed = 0;
 		xfer->pending_pe.b_layout.total_bytes = 0;
+		xfer->pending_pe.b_layout.payload_padded =
+			opts.image_io_mode == IMAGE_IO_DIRECT && !opts.stream;
 		xfer->pending_pe.payload_started = false;
 		return 0;
 	}
@@ -541,13 +543,20 @@ static int align_pages_image_payload(struct page_xfer *xfer, u32 *flags)
 
 static int write_compressed_payload(struct page_xfer *xfer, const void *buf, size_t size, bool raw)
 {
+	bool padded = xfer->pending_pe.b_layout.payload_padded;
+
 	if (!xfer->pending_pe.payload_started) {
 		xfer->pending_pe.payload_started = true;
-		if (raw && align_pages_image_payload(xfer, &xfer->pending_pe.flags))
+		if ((raw || padded) &&
+		    align_pages_image_payload(xfer, &xfer->pending_pe.flags))
 			return -1;
 	}
 
-	return write_pages_image_data(xfer, buf, size);
+	if (write_pages_image_data(xfer, buf, size))
+		return -1;
+	if (padded && align_pages_image_payload(xfer, &xfer->pending_pe.flags))
+		return -1;
+	return 0;
 }
 
 /*
@@ -676,7 +685,10 @@ static int write_pages_loc_compressed(struct page_xfer *xfer, int p, unsigned lo
 		}
 
 		xfer->pending_pe.b_layout.sizes[idx] = cs;
-		xfer->pending_pe.b_layout.total_bytes += cs;
+		if (xfer->pending_pe.b_layout.payload_padded && cs > 0)
+			xfer->pending_pe.b_layout.total_bytes += round_up((size_t)cs, PAGE_SIZE);
+		else
+			xfer->pending_pe.b_layout.total_bytes += cs;
 		if (cs > 0 && write_compressed_payload(xfer, payload, cs, (size_t)cs == block_bytes))
 			goto block_out;
 	}
@@ -709,6 +721,8 @@ block_out:
 			blocks.n_block_sizes = xfer->pending_pe.b_layout.nr_blocks;
 			blocks.total_payload_size = xfer->pending_pe.b_layout.total_bytes;
 			blocks.pages_per_block = block_pages;
+			blocks.has_payload_padded = true;
+			blocks.payload_padded = xfer->pending_pe.b_layout.payload_padded;
 			pe.blocks = &blocks;
 		}
 

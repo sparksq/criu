@@ -45,6 +45,21 @@
 #define OFF_MAX (sizeof(off_t) == sizeof(long long) ? LLONG_MAX : sizeof(off_t) == sizeof(int) ? INT_MAX : -999999)
 #define OFF_MIN (sizeof(off_t) == sizeof(long long) ? LLONG_MIN : sizeof(off_t) == sizeof(int) ? INT_MIN : -999999)
 
+static bool pagemap_blocks_payload_padded(const PagemapEntry *pe)
+{
+	return pe->blocks && pe->blocks->has_payload_padded &&
+	       pe->blocks->payload_padded;
+}
+
+static uint64_t pagemap_block_stored_size(const PagemapEntry *pe, size_t index)
+{
+	uint32_t size = pe->blocks->block_sizes[index];
+
+	if (size && pagemap_blocks_payload_padded(pe))
+		return round_up((uint64_t)size, PAGE_SIZE);
+	return size;
+}
+
 static inline bool can_extend_bunch(struct iovec *bunch, unsigned long off, unsigned long len)
 {
 	return /* The next region is the continuation of the existing */
@@ -247,7 +262,8 @@ static void skip_pagemap_pages(struct page_read *pr, unsigned long len)
 				nr -= take;
 
 				if (pr->blk.block_offset == bp) {
-					pr->pi_off += pr->pe->blocks->block_sizes[pr->blk.block_idx];
+					pr->pi_off += pagemap_block_stored_size(
+						pr->pe, pr->blk.block_idx);
 					pr->blk.block_idx++;
 					pr->blk.block_offset = 0;
 				}
@@ -503,12 +519,13 @@ static int piov_add_compressed_blocks(struct page_read_iov *piov,
 
 		piov->b_layout.sizes[first + i] = cs;
 		piov->block_pages[first + i] = (uint16_t)cur_block_pages;
-		added += cs;
+		added += pagemap_block_stored_size(pr->pe, idx);
 	}
 
 	piov->b_layout.total_bytes += added;
 	piov->b_layout.nr_blocks = new_n;
 	piov->b_layout.pages_per_block = block_pages;
+	piov->b_layout.payload_padded = pagemap_blocks_payload_padded(pr->pe);
 	piov->end += added;
 
 	return 0;
@@ -646,6 +663,7 @@ int pagemap_render_iovec(struct list_head *from, struct task_restore_args *ta)
 			rio->b_layout.nr_blocks = 0;
 			rio->b_layout.total_bytes = 0;
 			rio->b_layout.pages_per_block = 0;
+			rio->b_layout.payload_padded = false;
 			rio->n_pages = 0;
 			rio->block_pages = NULL;
 		} else {
@@ -654,6 +672,7 @@ int pagemap_render_iovec(struct list_head *from, struct task_restore_args *ta)
 			rio->b_layout.nr_blocks = piov->b_layout.nr_blocks;
 			rio->b_layout.total_bytes = piov->b_layout.total_bytes;
 			rio->b_layout.pages_per_block = piov->b_layout.pages_per_block;
+			rio->b_layout.payload_padded = piov->b_layout.payload_padded;
 
 			/* The final block may contain fewer pages. */
 			if (piov->b_layout.pages_per_block) {
@@ -717,7 +736,8 @@ static int advance_compressed_offsets(struct page_read *pr, unsigned long nr)
 	}
 
 	for (i = 0; i < n_blocks; i++)
-		pr->pi_off += pr->pe->blocks->block_sizes[pr->blk.block_idx + i];
+		pr->pi_off += pagemap_block_stored_size(
+			pr->pe, pr->blk.block_idx + i);
 	pr->blk.block_idx += n_blocks;
 
 	return 0;
@@ -842,6 +862,10 @@ static int pagemap_enqueue_iovec_one(struct page_read *pr, void *buf,
 	 * decompressed with a single block layout.
 	 */
 	if (cur_async->b_layout.pages_per_block != new_block_pages)
+		return enqueue_async_iov(pr, buf, len, to, storage);
+	if (storage != VMA_IO_UNCOMPRESSED &&
+	    cur_async->b_layout.payload_padded !=
+		pagemap_blocks_payload_padded(pr->pe))
 		return enqueue_async_iov(pr, buf, len, to, storage);
 
 	/*
@@ -1151,7 +1175,7 @@ static bool block_cache_hit(struct page_read *pr, unsigned long vaddr,
 
 static int block_cache_load(struct page_read *pr, int fd, char *compressed_buf,
 			    unsigned long vaddr, size_t idx, uint32_t cs,
-			    unsigned int pages, size_t bytes)
+			    size_t stored_size, unsigned int pages, size_t bytes)
 {
 	char *cache;
 	size_t old_size = pr->blk.cache_size;
@@ -1166,7 +1190,7 @@ static int block_cache_load(struct page_read *pr, int fd, char *compressed_buf,
 		pr->blk.cache_buf = cache;
 	}
 
-	if (pread_full(fd, compressed_buf, cs, pr->pi_off))
+	if (pread_full(fd, compressed_buf, stored_size, pr->pi_off))
 		return -1;
 
 	if (decompress_block(compressed_buf, cs, pages, pr->blk.cache_buf)) {
@@ -1202,6 +1226,7 @@ static int read_compressed_pages(struct page_read *pr, int fd,
 	while (pages_done < nr) {
 		size_t idx = pr->blk.block_idx;
 		uint32_t cs;
+		size_t stored_size;
 		unsigned int this_block;
 		size_t this_bytes;
 		unsigned int off = pr->blk.block_offset;
@@ -1217,6 +1242,7 @@ static int read_compressed_pages(struct page_read *pr, int fd,
 		}
 
 		cs = pr->pe->blocks->block_sizes[idx];
+		stored_size = pagemap_block_stored_size(pr->pe, idx);
 		this_block = current_block_pages(pr);
 		this_bytes = (size_t)this_block * PAGE_SIZE;
 
@@ -1247,14 +1273,28 @@ static int read_compressed_pages(struct page_read *pr, int fd,
 			char *new_scratch;
 
 			/* Whole block in one go: decompress straight into the dest. */
-			if (scratch_cap < cs) {
-				new_scratch = xrealloc(scratch, cs);
+			if (scratch_cap < stored_size) {
+				if (pr->use_direct) {
+					int memerr;
+
+					xfree(scratch);
+					scratch = NULL;
+					memerr = posix_memalign((void **)&new_scratch,
+							PAGE_SIZE, stored_size);
+					if (memerr) {
+						errno = memerr;
+						pr_perror("Unable to allocate aligned compressed block");
+						goto out;
+					}
+				} else {
+					new_scratch = xrealloc(scratch, stored_size);
+				}
 				if (!new_scratch)
 					goto out;
 				scratch = new_scratch;
-				scratch_cap = cs;
+				scratch_cap = stored_size;
 			}
-			if (pread_full(fd, scratch, cs, pr->pi_off))
+			if (pread_full(fd, scratch, stored_size, pr->pi_off))
 				goto out;
 			if (decompress_block(scratch, cs, this_block,
 					     (char *)buf + pages_done * PAGE_SIZE)) {
@@ -1271,15 +1311,29 @@ static int read_compressed_pages(struct page_read *pr, int fd,
 			 * pages from the same parent block.
 			 */
 			if (!block_cache_hit(pr, block_vaddr, this_bytes)) {
-				if (scratch_cap < cs) {
-					new_scratch = xrealloc(scratch, cs);
+				if (scratch_cap < stored_size) {
+					if (pr->use_direct) {
+						int memerr;
+
+						xfree(scratch);
+						scratch = NULL;
+						memerr = posix_memalign((void **)&new_scratch,
+								PAGE_SIZE, stored_size);
+						if (memerr) {
+							errno = memerr;
+							pr_perror("Unable to allocate aligned compressed block");
+							goto out;
+						}
+					} else {
+						new_scratch = xrealloc(scratch, stored_size);
+					}
 					if (!new_scratch)
 						goto out;
 					scratch = new_scratch;
-					scratch_cap = cs;
+					scratch_cap = stored_size;
 				}
 				if (block_cache_load(pr, fd, scratch, block_vaddr, idx,
-						     cs, this_block, this_bytes))
+						     cs, stored_size, this_block, this_bytes))
 					goto out;
 			}
 			memcpy((char *)buf + pages_done * PAGE_SIZE,
@@ -1291,7 +1345,7 @@ static int read_compressed_pages(struct page_read *pr, int fd,
 		pr->blk.block_offset = off + take;
 
 		if (pr->blk.block_offset == this_block) {
-			pr->pi_off += cs;
+			pr->pi_off += stored_size;
 			pr->blk.block_idx++;
 			pr->blk.block_offset = 0;
 		}
@@ -2103,12 +2157,18 @@ static int validate_compressed_pagemap_entry(PagemapEntry *pe)
 			return -1;
 		}
 
-		if (sum > UINT64_MAX - cs) {
+		if (sum > UINT64_MAX - pagemap_block_stored_size(pe, i)) {
 			pr_err("Compressed pagemap entry %#" PRIx64 " size sum overflows\n",
 			       pe->vaddr);
 			return -1;
 		}
-		sum += cs;
+		sum += pagemap_block_stored_size(pe, i);
+	}
+	if (sum && pagemap_blocks_payload_padded(pe) &&
+	    !pagemap_payload_aligned(pe)) {
+		pr_err("Padded compressed pagemap entry %#" PRIx64
+		       " has no aligned-payload flag\n", pe->vaddr);
+		return -1;
 	}
 
 	if (pe->blocks->total_payload_size != sum) {
@@ -2177,7 +2237,6 @@ static int validate_pagemap_entry_layout(PagemapEntry *pe,
 static int validate_pages_image_layout(PagemapEntry *pe, off_t *offset)
 {
 	uint64_t payload = 0;
-	size_t i;
 
 	if (!pagemap_present(pe))
 		return 0;
@@ -2192,8 +2251,7 @@ static int validate_pages_image_layout(PagemapEntry *pe, off_t *offset)
 	}
 
 	if (pe->blocks) {
-		for (i = 0; i < pe->blocks->n_block_sizes; i++)
-			payload += pe->blocks->block_sizes[i];
+		payload = pe->blocks->total_payload_size;
 	} else {
 		payload = pe->nr_pages * PAGE_SIZE;
 	}
@@ -2216,6 +2274,20 @@ static bool page_read_has_compressed_entries(struct page_read *pr)
 	}
 
 	return false;
+}
+
+static bool page_read_supports_direct(struct page_read *pr)
+{
+	int i;
+
+	for (i = 0; i < pr->nr_pmes; i++) {
+		PagemapEntry *pe = pr->pmes[i];
+
+		if (pagemap_entry_has_compressed(pe) &&
+		    !pagemap_blocks_payload_padded(pe))
+			return false;
+	}
+	return true;
 }
 
 /*
@@ -2633,14 +2705,14 @@ int open_page_read_at(int dfd, unsigned long img_id, struct page_read *pr, int p
 
 		/*
 		 * O_DIRECT requires reads to be aligned in offset and
-		 * length. Compressed pages are stored as variable-length
-		 * blocks packed contiguously, so reads are unaligned and
-		 * O_DIRECT would fail with EINVAL. Use buffered I/O for any
-		 * reader whose own pagemap contains compressed entries; parent
-		 * images may differ from the top inventory's compression mode.
+		 * length. Legacy compressed pages are packed contiguously, while
+		 * padded compressed entries advertise page-rounded extents in their
+		 * pagemap metadata. Enable direct I/O only when every compressed
+		 * entry in this pages image uses the padded layout; parent images may
+		 * differ from the top inventory's compression mode.
 		 */
 		if (pfd >= 0 && !opts.stream && opts.image_io_mode == IMAGE_IO_DIRECT &&
-		    !page_read_has_compressed_entries(pr)) {
+		    page_read_supports_direct(pr)) {
 			int direct = probe_pages_o_direct(pfd);
 
 			if (direct < 0) {
