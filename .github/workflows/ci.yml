@@ -1,20 +1,27 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [criu-dev, master]
+  pull_request:
+    branches: [criu-dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 # Cancel any preceding run on the pull request.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/criu-dev' }}
+  cancel-in-progress: true
 
 jobs:
-  alpine-test:
-    name: Alpine Test (${{ matrix.target }}, ${{ matrix.shard_name }})
+  alpine-clang-test:
+    name: Alpine Clang Test (${{ matrix.shard_name }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-26.04]
-        target: [GCC=1, CLANG=1]
         shard: [0, 1, 2, 3, 4]
         include:
           - shard: 0
@@ -29,35 +36,42 @@ jobs:
             shard_name: non-zdtm
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v7
-    - name: Run Alpine ${{ matrix.target }} ${{ matrix.shard_name }} Test
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+    - name: Run Alpine Clang ${{ matrix.shard_name }} Test
       run: >
-        sudo -E make -C scripts/ci alpine ${{ matrix.target }}
+        sudo -E make -C scripts/ci alpine CLANG=1
         ZDTM_SHARD_INDEX=${{ matrix.shard }}
         ZDTM_SHARD_COUNT=4
     - name: Print dmesg
       if: always()
       run: sudo dmesg
 
-  alpine-test-arm64:
-    name: Alpine Test ARM64
-    needs: [alpine-test]
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04-arm]
-        target: [GCC=1, CLANG=1]
-    runs-on: ${{ matrix.os }}
+  alpine-clang-test-arm64:
+    name: Alpine Clang Test ARM64
+    runs-on: ubuntu-22.04-arm
     steps:
-    - uses: actions/checkout@v7
-    - name: Run Alpine ${{ matrix.target }} Test
-      run: sudo -E make -C scripts/ci alpine ${{ matrix.target }}
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+    - name: Run Alpine Clang Test
+      run: sudo -E make -C scripts/ci alpine CLANG=1
     - name: Print dmesg
       if: always()
       run: sudo dmesg
 
+  alpine-clang-gate:
+    name: Alpine Clang gate
+    if: always()
+    needs: [alpine-clang-test, alpine-clang-test-arm64]
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Verify required Clang tests
+      env:
+        AMD64_RESULT: ${{ needs.alpine-clang-test.result }}
+        ARM64_RESULT: ${{ needs.alpine-clang-test-arm64.result }}
+      run: |
+        test "$AMD64_RESULT" = success
+        test "$ARM64_RESULT" = success
+
   aarch64-test:
-    needs: [alpine-test]
     strategy:
       fail-fast: false
       matrix:
@@ -65,7 +79,7 @@ jobs:
         target: [GCC=1, CLANG=1]
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Run Tests ${{ matrix.target }} on ${{ matrix.os }}
       run: |
         # The 'sched_policy00' needs the following:
@@ -80,7 +94,6 @@ jobs:
 
   archlinux-test:
     name: Arch Linux Test (${{ matrix.shard_name }})
-    needs: [alpine-test]
     # archlinux:latest + pacman -Syu is a rolling-release build; failures
     # caused by upstream package churn are outside CRIU's control.
     continue-on-error: true
@@ -101,7 +114,7 @@ jobs:
             shard_name: non-zdtm
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Run Arch Linux ${{ matrix.shard_name }} Test
       run: >
         sudo -E make -C scripts/ci archlinux
@@ -115,7 +128,6 @@ jobs:
     name: CentOS Stream ${{ matrix.version }}
     # aarch64 is not supported by lima-vm/lima-actions
     # https://github.com/lima-vm/lima-actions/pull/1
-    needs: [alpine-test]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -123,7 +135,7 @@ jobs:
       matrix:
         version: [9, 10]
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - uses: ./.github/actions/lima-vm-setup
       with:
         template: centos-stream-${{ matrix.version }}
@@ -141,14 +153,13 @@ jobs:
       run: lima sudo dmesg
 
   compat-test:
-    needs: [alpine-test]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
         target: [GCC, CLANG]
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Run Compat Tests (${{ matrix.target }})
       run: sudo -E make -C scripts/ci local COMPAT_TEST=y ${{ matrix.target }}=1
     - name: Print dmesg
@@ -156,8 +167,7 @@ jobs:
       run: sudo dmesg
 
   cross-compile:
-    needs: [alpine-test]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
@@ -167,6 +177,7 @@ jobs:
           armv7-stable-cross,
           aarch64-stable-cross,
           ppc64-stable-cross,
+          mips64el-stable-cross,
           riscv64-stable-cross,
         ]
         include:
@@ -177,29 +188,27 @@ jobs:
           - experimental: true
             target: ppc64-unstable-cross
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Run Cross Compilation Targets
       run: >
         sudo make -C scripts/ci ${{ matrix.target }}
         BUILD_OPTIONS="--build-arg CI_CROSS_COMPILE=1"
 
   docker-test:
-    needs: [alpine-test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04]
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Run Docker Test (${{ matrix.os }})
       run: sudo make -C scripts/ci docker-test
 
   fedora-asan-test:
-    needs: [alpine-test]
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Run Fedora ASAN Test
       run: sudo -E make -C scripts/ci fedora-asan
     - name: Print dmesg
@@ -208,7 +217,6 @@ jobs:
 
   fedora-rawhide-test:
     name: ${{ matrix.name }}
-    needs: [alpine-test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -219,7 +227,7 @@ jobs:
           - os: ubuntu-24.04-arm
             name: aarch64 Fedora Rawhide
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Run Fedora Rawhide Test
       # We need to pass environment variables from the CI environment to
       # distinguish between CI environments. However, we need to make sure that
@@ -232,7 +240,6 @@ jobs:
 
   vm-fedora-rawhide-test:
     name: VM Fedora ${{ matrix.name }} based test
-    needs: [alpine-test]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -252,7 +259,7 @@ jobs:
             name: Non-Root
             reboot: false
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - uses: ./.github/actions/lima-vm-setup
       with:
         template: fedora
@@ -275,10 +282,12 @@ jobs:
       run: lima sudo dmesg
 
   gcov-test:
-    needs: [alpine-test]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Run Coverage Tests
       run: sudo -E make -C scripts/ci local GCOV=1
     - name: Run gcov
@@ -286,31 +295,28 @@ jobs:
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
       with:
-        token: ${{ secrets.CODECOV_TOKEN }}
+        use_oidc: true
     - name: Print dmesg
       if: always()
       run: sudo dmesg
 
   java-test:
-    needs: [alpine-test]
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Run Java Test
       run: sudo make -C scripts/ci java-test
 
   loongarch64-qemu-test:
-    needs: [alpine-test]
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: sudo make -C scripts/ci loongarch64-qemu-test
 
   nftables-test:
-    needs: [alpine-test]
     runs-on: ubuntu-26.04
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Remove iptables
       run: sudo apt remove -y iptables
     - name: Install libnftables-dev
@@ -326,18 +332,16 @@ jobs:
       run: sudo dmesg
 
   podman-test:
-    needs: [alpine-test]
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Run Podman Test
       run: sudo make -C scripts/ci podman-test
 
   stream-test:
-    needs: [alpine-test]
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Run CRIU Image Streamer Test
       run: sudo -E make -C scripts/ci local STREAM_TEST=1
     - name: Print dmesg
@@ -345,10 +349,9 @@ jobs:
       run: sudo dmesg
 
   x86-64-clang-test:
-    needs: [alpine-test]
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Run X86_64 CLANG Test
       run: sudo make -C scripts/ci x86_64 CLANG=1
     - name: Print dmesg
@@ -356,10 +359,9 @@ jobs:
       run: sudo dmesg
 
   x86-64-gcc-test:
-    needs: [alpine-test]
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Run X86_64 GCC Test
       run: sudo make -C scripts/ci x86_64
     - name: Print dmesg

@@ -11,12 +11,12 @@ on:
 # Cancel any preceding run on the pull request.
 concurrency:
   group: codeql-test-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/criu-dev' }}
+  cancel-in-progress: true
 
 jobs:
   analyze:
     name: Analyze
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
@@ -29,22 +29,26 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Packages (cpp)
         if: ${{ matrix.language == 'cpp' }}
         run: |
-          sudo contrib/apt-install protobuf-c-compiler libprotobuf-c-dev libprotobuf-dev build-essential libprotobuf-dev libprotobuf-c-dev protobuf-c-compiler protobuf-compiler python3-protobuf libnet-dev pkg-config libnl-3-dev libbsd0 libbsd-dev iproute2 libcap-dev libaio-dev libbsd-dev python3-yaml libnl-route-3-dev gnutls-dev
+          sudo contrib/apt-install build-essential protobuf-c-compiler \
+            libprotobuf-c-dev libprotobuf-dev protobuf-compiler \
+            python3-protobuf libnet-dev pkg-config libnl-3-dev libbsd0 \
+            libbsd-dev iproute2 libcap-dev libaio-dev python3-yaml \
+            libnl-route-3-dev gnutls-dev
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@fddeee1a7ece751b577e409a89057319e3172939 # v4
         with:
           languages: ${{ matrix.language }}
           queries: +security-and-quality
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v4
+        uses: github/codeql-action/autobuild@fddeee1a7ece751b577e409a89057319e3172939 # v4
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@fddeee1a7ece751b577e409a89057319e3172939 # v4
         with:
           category: "/language:${{ matrix.language }}"

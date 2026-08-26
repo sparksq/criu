@@ -4,17 +4,24 @@ on:
   schedule:
     - cron:  '30 12 * * *'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-cross-compile
+  cancel-in-progress: true
+
 jobs:
   build:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         target: [armv7-stable-cross, aarch64-stable-cross, ppc64-stable-cross, mips64el-stable-cross, riscv64-stable-cross]
         branches: [criu-dev, master]
 
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       with:
         ref: ${{ matrix.branches }}
     - name: Run Cross Compilation Targets

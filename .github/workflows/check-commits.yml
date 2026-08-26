@@ -2,17 +2,22 @@ name: Verify self-contained commits
 
 on: pull_request
 
+permissions:
+  contents: read
+
 # Cancel any preceding run on the pull request
 concurrency:
   group: commit-test-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Self-contained commits
+    runs-on: ubuntu-24.04
     # Check if pull request does not have label "not-selfcontained-ok"
     if: "!contains(github.event.pull_request.labels.*.name, 'not-selfcontained-ok')"
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       with:
         # Needed to rebase against the base branch
         fetch-depth: 0

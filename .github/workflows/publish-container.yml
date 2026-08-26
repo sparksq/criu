@@ -4,10 +4,13 @@ on:
   push:
     branches:
       - criu-dev
+  pull_request:
+    branches:
+      - criu-dev
   workflow_dispatch:
 
 concurrency:
-  group: publish-container-${{ github.ref }}
+  group: publish-container-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -40,10 +43,24 @@ jobs:
         if: always()
         run: sudo dmesg || true
 
-  publish:
-    name: Publish multi-platform image
+  test-gate:
+    name: Container test gate
+    if: always()
     needs: test
     runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Verify required container tests
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: test "$TEST_RESULT" = success
+
+  publish:
+    name: Publish multi-platform image
+    if: github.event_name != 'pull_request'
+    needs: test-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write

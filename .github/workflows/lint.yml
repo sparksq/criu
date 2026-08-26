@@ -1,22 +1,31 @@
 name: Run code linter
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [criu-dev, master]
+  pull_request:
+    branches: [criu-dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 # Cancel any preceding run on the pull request.
 concurrency:
   group: lint-test-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/criu-dev' }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Lint
+    runs-on: ubuntu-24.04
     container:
-      image: registry.fedoraproject.org/fedora:latest
+      image: registry.fedoraproject.org/fedora@sha256:9c2c477db931e075f334132360b2fd35d8c0b0ec9324a62d2dbf8ec6493cdab5
     steps:
     - name: Install tools
       run: sudo dnf -y install git make ruff xz clang-tools-extra codespell git-clang-format ShellCheck
 
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
     - name: Set git safe directory
       # https://github.com/actions/checkout/issues/760

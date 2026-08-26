@@ -7,13 +7,21 @@ on:
   schedule:
   - cron: "0 0 * * *"
 
+permissions:
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: stale-issues-and-pull-requests
+  cancel-in-progress: true
+
 jobs:
   stale:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
-    - uses: actions/stale@v10
+    - uses: actions/stale@1e223db275d687790206a7acac4d1a11bd6fe629 # v10
       with:
         repo-token: ${{ secrets.GITHUB_TOKEN }}
         stale-issue-message: 'A friendly reminder that this issue had no activity for 30 days.'
