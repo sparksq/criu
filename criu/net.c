@@ -3588,6 +3588,15 @@ void network_unlock(void)
 {
 	pr_info("Unlock network\n");
 
+	/*
+	 * Host-network restores need the same last safe coordination point as
+	 * restored network namespaces. Notify RPC clients before TCP repair is
+	 * disabled so a distributed restore can keep every rank packet-isolated
+	 * until all peer sockets exist.
+	 */
+	if (!(root_ns_mask & CLONE_NEWNET))
+		run_scripts(ACT_NET_UNLOCK);
+
 	cpt_unlock_tcp_connections();
 	rst_unlock_tcp_connections();
 
