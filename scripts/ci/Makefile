@@ -46,6 +46,7 @@ endif
 export ZDTM_OPTS
 export ZDTM_SHARD_INDEX
 export ZDTM_SHARD_COUNT
+export SKIP_CI_TEST
 
 $(TARGETS):
 	$(MAKE) -C ../build $@$(target-suffix)
@@ -55,6 +56,7 @@ $(TARGETS):
 		$(if $(ZDTM_OPTS),-e ZDTM_OPTS) \
 		$(if $(ZDTM_SHARD_INDEX),-e ZDTM_SHARD_INDEX) \
 		$(if $(ZDTM_SHARD_COUNT),-e ZDTM_SHARD_COUNT) \
+		$(if $(SKIP_CI_TEST),-e SKIP_CI_TEST) \
 		$(if $(CLANG),-e CC=clang -e HOSTCC=clang) \
 		$(CONTAINER_OPTS) \
 		criu-$@ scripts/ci/run-ci-tests.sh

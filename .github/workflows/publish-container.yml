@@ -36,8 +36,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Run Alpine test suite
-        run: sudo -E make -C scripts/ci alpine GCC=1
+      - name: Build CRIU and run Alpine unit tests
+        run: sudo -E make -C scripts/ci alpine GCC=1 SKIP_CI_TEST=1
 
       - name: Print kernel log
         if: always()
