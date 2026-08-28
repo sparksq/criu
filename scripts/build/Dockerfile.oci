@@ -6,6 +6,7 @@ COPY contrib/apt-install /criu/contrib/apt-install
 COPY contrib/dependencies/apt-packages.sh /criu/contrib/dependencies/apt-packages.sh
 
 RUN /criu/contrib/dependencies/apt-packages.sh && \
+	/criu/contrib/apt-install libnftables-dev && \
 	if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
 		/criu/contrib/apt-install gcc-multilib; \
 	fi
@@ -47,7 +48,8 @@ RUN /usr/local/bin/apt-install \
 
 COPY --from=build /opt/criu/ /
 
-RUN criu --version
+RUN ldd /usr/sbin/criu | grep -q 'libnftables\.so' && \
+	criu --version
 
 ENTRYPOINT ["/usr/sbin/criu"]
 CMD ["--help"]
