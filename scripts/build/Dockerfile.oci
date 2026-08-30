@@ -16,7 +16,12 @@ COPY . .
 
 RUN make mrproper && \
 	make -j"$(nproc)" && \
+	make -C plugins/coldsnap && \
 	make install-criu DESTDIR=/opt/criu PREFIX=/usr && \
+	install -D -m 0755 \
+		plugins/coldsnap/coldsnap_nvidia_reset_plugin.so \
+		/opt/criu/usr/lib/criu/coldsnap_nvidia_reset_plugin.so && \
+	install -D -m 0644 COPYING /opt/criu/usr/share/licenses/criu/COPYING && \
 	ldd /opt/criu/usr/sbin/criu | \
 	awk '$2 == "=>" && $3 ~ /^\// { print $3 } $1 ~ /^\// { print $1 }' | \
 	while read -r library; do \
@@ -29,7 +34,7 @@ FROM docker.io/library/ubuntu:24.04
 
 LABEL org.opencontainers.image.title="CRIU" \
 	org.opencontainers.image.description="Checkpoint and Restore in Userspace" \
-	org.opencontainers.image.licenses="GPL-2.0"
+	org.opencontainers.image.licenses="GPL-2.0-only"
 
 COPY contrib/apt-install /usr/local/bin/apt-install
 COPY --from=build /opt/criu/runtime-packages /tmp/runtime-packages
@@ -49,6 +54,8 @@ RUN /usr/local/bin/apt-install \
 COPY --from=build /opt/criu/ /
 
 RUN ldd /usr/sbin/criu | grep -q 'libnftables\.so' && \
+	test -x /usr/lib/criu/coldsnap_nvidia_reset_plugin.so && \
+	test -s /usr/share/licenses/criu/COPYING && \
 	criu --version
 
 ENTRYPOINT ["/usr/sbin/criu"]
